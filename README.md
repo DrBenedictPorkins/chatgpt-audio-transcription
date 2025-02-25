@@ -42,10 +42,27 @@ This project is a Python script that transcribes audio files using either OpenAI
 
 ## Usage
 
-Run the script with the following command:
+### Minimal Examples
 
+The only required argument is the path to your audio files:
+
+**OpenAI (default service):**
 ```
 python transcribe_audio.py --audio-files-path /path/to/audio/files
+```
+
+**AssemblyAI:**
+```
+python transcribe_audio.py --audio-files-path /path/to/audio/files --service assemblyai
+```
+
+**Practical Examples:**
+```
+# Transcribe audio files in Downloads folder using OpenAI
+python transcribe_audio.py --audio-files-path ~/Downloads/podcast_interviews
+
+# Transcribe meeting recordings using AssemblyAI for better speaker detection
+python transcribe_audio.py --audio-files-path ~/Documents/Meetings --service assemblyai
 ```
 
 ### Optional arguments:
@@ -61,20 +78,19 @@ python transcribe_audio.py --audio-files-path /path/to/audio/files
 - `--speakers-expected`: Number of speakers expected in the audio (helps improve diarization accuracy)
 - `--custom-spelling`: Custom word or phrase mappings in format "key:value1,value2|key2:value3"
 
-Example with OpenAI:
+### Complete Examples
 
+**OpenAI with all options:**
 ```
-python transcribe_audio.py --audio-files-path /path/to/audio/files --service openai --output-file /path/to/output.txt --prompt "This conversation may include names like Makram, John Doe, Jane Smith, and technologies or terms such as Python, JavaScript, OpenAI, ChatGPT, Whisper, machine learning, and audio transcription." --archive-dir /path/to/archive
+python transcribe_audio.py --audio-files-path /path/to/audio/files --service openai --model whisper-1 --output-file /path/to/output.txt --prompt "This conversation may include names like Makram, John Doe, Jane Smith, and technologies or terms such as Python, JavaScript, OpenAI, ChatGPT, Whisper, machine learning, and audio transcription." --archive-dir /path/to/archive
 ```
 
-Example with AssemblyAI (includes automatic speaker diarization):
-
+**AssemblyAI with basic speaker diarization:**
 ```
 python transcribe_audio.py --audio-files-path /path/to/audio/files --service assemblyai --output-file /path/to/output.txt --archive-dir /path/to/archive
 ```
 
-Example with AssemblyAI using advanced options:
-
+**AssemblyAI with advanced options:**
 ```
 python transcribe_audio.py --audio-files-path /path/to/audio/files --service assemblyai --speakers-expected 3 --custom-spelling "Python:python,py|JavaScript:javascript,js" --output-file /path/to/output.txt
 ```
