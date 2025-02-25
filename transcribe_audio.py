@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pathlib import Path
 import argparse
 import os
@@ -7,21 +7,30 @@ import logging
 import datetime
 import sys
 import subprocess
-import time  # Added time module import
+import time
+from enum import Enum
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
+import assemblyai as aai
 from tqdm import tqdm  # For progress bars
 
 load_dotenv(override=True)
 
 
+class TranscriptionService(str, Enum):
+    OPENAI = "openai"
+    ASSEMBLYAI = "assemblyai"
+
+
 # Configuration
 @dataclass
 class Config:
+    TRANSCRIPTION_SERVICE: TranscriptionService = TranscriptionService.OPENAI
     WHISPER_MODEL: str = "whisper-1"
+    ASSEMBLYAI_MODEL: str = "nova"  # AssemblyAI's default model
     MAX_FILE_SIZE_MB: int = 25  # OpenAI's limit
-    SUPPORTED_EXTENSIONS: tuple = (".mp3", ".mp4", ".mpeg", ".mpga", ".m4a")
+    SUPPORTED_EXTENSIONS: tuple = (".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav")
     MAX_RETRIES: int = 3
     RETRY_DELAY_SECONDS: int = 1
 
@@ -29,8 +38,8 @@ class Config:
 class AudioTranscriber:
     def __init__(self, config: Config):
         self.config = config
-        self.client = OpenAI()
         self.setup_logging()
+        self.setup_clients()
 
     def setup_logging(self) -> None:
         """Configure logging with the level from environment."""
@@ -38,6 +47,18 @@ class AudioTranscriber:
             level=os.getenv("LOG_LEVEL", "INFO"),
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
+        
+    def setup_clients(self) -> None:
+        """Initialize API clients based on service configuration."""
+        if self.config.TRANSCRIPTION_SERVICE == TranscriptionService.OPENAI:
+            self.client = OpenAI()
+            logging.info("Using OpenAI for transcription")
+        elif self.config.TRANSCRIPTION_SERVICE == TranscriptionService.ASSEMBLYAI:
+            aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
+            if not aai.settings.api_key:
+                raise ValueError("ASSEMBLYAI_API_KEY must be set in .env file")
+            self.client = aai
+            logging.info("Using AssemblyAI for transcription")
 
     def validate_audio_file(self, file_path: Path) -> bool:
         """Validate audio file size and format."""
@@ -46,28 +67,54 @@ class AudioTranscriber:
             return False
 
         size_mb = file_path.stat().st_size / (1024 * 1024)
-        if size_mb > self.config.MAX_FILE_SIZE_MB:
-            logging.error(f"File too large: {file_path} ({size_mb:.1f}MB)")
+        # For AssemblyAI, we don't need to check file size as they support larger files
+        if self.config.TRANSCRIPTION_SERVICE == TranscriptionService.OPENAI and size_mb > self.config.MAX_FILE_SIZE_MB:
+            logging.error(f"File too large for OpenAI: {file_path} ({size_mb:.1f}MB)")
             return False
 
         return True
 
+    def transcribe_with_openai(self, audio_file_path: Path, transcription_so_far: str) -> str:
+        """Transcribe audio using OpenAI's Whisper model."""
+        with open(audio_file_path, 'rb') as audio_file:
+            response = self.client.audio.transcriptions.create(
+                model=self.config.WHISPER_MODEL,
+                file=audio_file,
+                prompt=transcription_so_far
+            )
+            return response.text
+
+    def transcribe_with_assemblyai(self, audio_file_path: Path, transcription_so_far: str) -> str:
+        """Transcribe audio using AssemblyAI."""
+        # AssemblyAI doesn't directly support prompts like OpenAI, but we can
+        # configure additional parameters if needed
+        config = aai.TranscriptionConfig(
+            language_model=self.config.ASSEMBLYAI_MODEL
+        )
+        
+        transcriber = self.client.Transcriber()
+        transcript = transcriber.transcribe(str(audio_file_path), config=config)
+        
+        if transcript.error:
+            raise RuntimeError(f"AssemblyAI transcription error: {transcript.error}")
+            
+        return transcript.text
+        
     def transcribe_audio(self, audio_file_path: Path, transcription_so_far: str) -> Optional[str]:
         """Transcribe audio file with retry mechanism."""
         logging.info(f"Transcribing audio file: {audio_file_path}")
 
         for attempt in range(self.config.MAX_RETRIES):
             try:
-                with open(audio_file_path, 'rb') as audio_file:
-                    response = self.client.audio.transcriptions.create(
-                        model=self.config.WHISPER_MODEL,
-                        file=audio_file,
-                        prompt=transcription_so_far
-                    )
-                    text = response.text
-                    logging.info(f'Transcription for {audio_file_path}: {len(text)} chars')
-                    return text
-            except OpenAIError as e:
+                if self.config.TRANSCRIPTION_SERVICE == TranscriptionService.OPENAI:
+                    text = self.transcribe_with_openai(audio_file_path, transcription_so_far)
+                else:  # AssemblyAI
+                    text = self.transcribe_with_assemblyai(audio_file_path, transcription_so_far)
+                
+                logging.info(f'Transcription for {audio_file_path}: {len(text)} chars')
+                return text
+                
+            except (OpenAIError, RuntimeError) as e:
                 if attempt == self.config.MAX_RETRIES - 1:
                     logging.error(f"Transcription failed after {self.config.MAX_RETRIES} attempts: {e}")
                     raise
@@ -158,6 +205,18 @@ def main():
         type=Path,
         help='Directory for processed files (default: archive-TIMESTAMP in audio directory)'
     )
+    parser.add_argument(
+        '--service',
+        type=str,
+        choices=['openai', 'assemblyai'],
+        default='openai',
+        help='Transcription service to use (openai or assemblyai)'
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        help='Model to use for transcription (whisper-1 for OpenAI, nova/aurora for AssemblyAI)'
+    )
 
     args = parser.parse_args()
 
@@ -184,8 +243,22 @@ def main():
     if prompt:
         logging.info(f"Using prompt:\n{prompt}")
 
+    # Configure transcription service and model
+    config = Config()
+    
+    # Set transcription service
+    if args.service:
+        config.TRANSCRIPTION_SERVICE = TranscriptionService(args.service)
+        
+    # Set model if specified
+    if args.model:
+        if config.TRANSCRIPTION_SERVICE == TranscriptionService.OPENAI:
+            config.WHISPER_MODEL = args.model
+        elif config.TRANSCRIPTION_SERVICE == TranscriptionService.ASSEMBLYAI:
+            config.ASSEMBLYAI_MODEL = args.model
+    
     # Process files
-    transcriber = AudioTranscriber(Config())
+    transcriber = AudioTranscriber(config)
     success = transcriber.process_files(args.audio_files_path, output_file, archive_dir, prompt)
 
     sys.exit(0 if success else 1)
